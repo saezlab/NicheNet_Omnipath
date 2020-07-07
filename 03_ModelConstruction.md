@@ -1,0 +1,108 @@
+Construction of NicheNet’s ligand-target model using Omnipath
+Interactions
+================
+Alberto Valdeolivas: <alberto.valdeolivas@bioquant.uni-heidelberg.de>;
+Date:
+29/02/2020
+
+## Abstract
+
+This vignette shows how to build the ligand-target prior regulatory
+potential scores based on the NicheNet method but using Omnipath
+interactions.
+
+## Construct a ligand-target model from Omnipath ligand-receptor, signaling and gene regulatory networks
+
+We first load the required packages and the networks generated on the
+previous scripts: Omnipath ligand-receptor, Omnipath signaling and
+Omnipath (Dorothea) gene regulatory network. These networks are used to
+construct the ligand-target model.
+
+``` r
+library(nichenetr)
+library(tidyverse)
+
+## We load the networks generated in the ParameterOptimization script
+lr_network_Omnipath = readRDS("OmniNetworks_NNformat/lr_Network_Omnipath.rds")
+sig_network_Omnipath = readRDS("OmniNetworks_NNformat/sig_Network_Omnipath.rds")
+gr_network_Omnipath = readRDS("OmniNetworks_NNformat/gr_Network_Omnipath.rds")
+```
+
+## Construct NicheNet’s ligand-target model from unoptimized data source weights
+
+The interactions available in Omnipath are well curated, and we
+therefore first create a model considering the same weight for all the
+databases. On the other hand, we use the optimized parameters for the
+PageRank algorithm.
+
+``` r
+## The interactions are weighted only based in the number of data sources that
+## report them
+All_sources <- unique(c(lr_network_Omnipath$source,
+    sig_network_Omnipath$source, gr_network_Omnipath$source))
+
+my_source_weights_df <- 
+     tibble(source = All_sources, weight = rep(1,length(All_sources)))
+
+weighted_networks <- construct_weighted_networks(
+    lr_network = lr_network_Omnipath, 
+    sig_network = sig_network_Omnipath, 
+    gr_network = gr_network_Omnipath, 
+    source_weights_df = my_source_weights_df)
+
+## We read the results of the optimization 
+resultsOptimization <- readRDS("Results/Optimization_results.rds")
+
+optimized_parameters = resultsOptimization %>% 
+    process_mlrmbo_nichenet_optimization(
+        source_names = my_source_weights_df$source %>% unique())
+
+weighted_networks <- apply_hub_corrections(
+    weighted_networks = weighted_networks, 
+    lr_sig_hub = optimized_parameters$lr_sig_hub, 
+    gr_hub = optimized_parameters$gr_hub)
+saveRDS(weighted_networks,"Results/weighted_networksNonSourceWeights.rds")
+```
+
+We now generate the matrix containing the ligand-target regulatory
+potential scores based on the weighted integrated networks.
+
+``` r
+ligands <- as.list(unique(lr_network_Omnipath$from))
+
+ligand_target_matrix <- construct_ligand_target_matrix(
+    weighted_networks = weighted_networks, 
+    ligands = ligands, 
+    algorithm = "PPR", 
+    damping_factor = optimized_parameters$damping_factor, 
+    ltf_cutoff = optimized_parameters$ltf_cutoff)
+saveRDS(ligand_target_matrix,"Results/ligand_target_matrixNoweights.rds")
+```
+
+## Construct NicheNet’s ligand-target model from optimized data source weights
+
+Now, we create an alternative model using the optimized weights for the
+different sources of data.
+
+``` r
+## Here we also take into account the optimized source weights
+weighted_networks <- construct_weighted_networks(
+    lr_network = lr_network_Omnipath, 
+    sig_network = sig_network_Omnipath, 
+    gr_network = gr_network_Omnipath,
+    source_weights_df = optimized_parameters$source_weight_df)
+
+weighted_networks <- apply_hub_corrections(
+    weighted_networks = weighted_networks, 
+    lr_sig_hub = optimized_parameters$lr_sig_hub, 
+    gr_hub = optimized_parameters$gr_hub)
+
+ligand_target_matrix = construct_ligand_target_matrix(
+    weighted_networks = weighted_networks, 
+    ligands = ligands, 
+    algorithm = "PPR", 
+    damping_factor = optimized_parameters$damping_factor, 
+    ltf_cutoff = optimized_parameters$ltf_cutoff)
+saveRDS(ligand_target_matrix,"Results/ligand_target_matrixWithweights.rds")
+saveRDS(weighted_networks,"Results/weighted_networksWithSourceWeights.rds")
+```

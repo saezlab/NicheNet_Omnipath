@@ -1,0 +1,294 @@
+---
+title: "NicheNet: Assess how well top-ranked ligands can predict a gene set of interest"
+author: "Alberto Valdeolivas: alberto.valdeolivas@bioquant.uni-heidelberg.de; Date:"
+date: "23/06/2020"
+output: github_document
+# license: GNU-GLPv3, please check http://www.gnu.org/licenses/
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE, warning = FALSE, 
+    message = FALSE)
+```
+
+## Abstract
+
+This vignette aims at reproducing the results of the following original 
+vignette, available in the NicheNetr repository: 
+
+<https://github.com/saeyslab/nichenetr/blob/master/vignettes/target_prediction_evaluation_geneset.md>
+
+In our particular case, we use sets of interactions availabe in the **Omnipath** 
+database. We will study potential ligand-targets influence upon SARS-CoV-2 
+infection. 
+
+## Introduction
+
+This vignette shows how NicheNet can be used to to predict which ligands might 
+regulate a given set of genes and how well they do this prediction. For this 
+analysis, one needs to define:
+
+* a set of genes of which expression in a "receiver cell" is possibly affected 
+by extracellular protein signals (ligands) (e.g. genes differentially expressed 
+upon cell-cell interaction )
+* a set of potentially active ligands (e.g. ligands expressed by interacting 
+"sender cells")
+
+Therefore, you often first need to process expression data of interacting cells 
+to define both.
+
+In this example, we are going to use expression data after SARS-CoV-2 infection 
+to try to dissect which ligands  expressed by infected cells can have an i
+nfluence on the expression of target genes in the same cell lines 
+(Autocrine view). In particular, we will focus on the inflammation response 
+potentially induced by this ligands. 
+
+```{r}
+library(nichenetr)
+library(tidyverse)
+library(fgsea)
+```
+
+### Read expression data of interacting cells
+
+First, we read the results of the differentially expression analysis after
+infection with SARS-CoV-2 on the CALU-3 cell line. 
+
+```{r}
+expressed_genes_receiver <- 
+    readRDS("Results/dds_results_CALU3vsCOV2.rds") %>%
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "Gene") %>%
+    dplyr::filter(!is.na(stat)) %>%
+    dplyr::pull(Gene)
+```
+
+Secondly, we determine which ligands are over-expressed after SARS-CoV-2 
+infection.
+
+```{r}
+padj_tres <- 0.1
+log2FoldChange_tres <- 1
+
+## We take our ligands in the network
+ligands <- 
+    readRDS("OmniNetworks_NNformat/lr_Network_Omnipath.rds") %>%
+    dplyr::pull(from) %>% 
+    unique()
+
+DDS_CALU3_ligands <- 
+    readRDS("Results/dds_results_CALU3vsCOV2.rds") %>%
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "Gene") %>%
+    dplyr::filter(padj < padj_tres, 
+                  log2FoldChange > log2FoldChange_tres, 
+                  Gene %in% ligands) %>%
+    dplyr::pull(Gene)
+```
+
+### Load the ligand-target model we want to use
+
+```{r}
+ligand_target_matrix <- readRDS("Results/ligand_target_matrixWithweights.rds")
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+```
+
+### Load the gene set of interest and background of genes
+
+To establish a gene set of interest, we perform a Gene set Enrichment analysis
+(GSEA) and we check among the most appealing overrepresanted signatures upon
+SARS-CoV-2 infection. We remove the differentially expressed ligands from this 
+comparison. 
+
+```{r, warning=FALSE, message=FALSE}
+ranks <- readRDS("Results/dds_results_CALU3vsCOV2.rds") %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column(var = "Gene") %>%
+    dplyr::filter(!(Gene %in% DDS_CALU3_ligands)) %>% 
+    dplyr::filter(!is.na(stat)) %>% 
+    dplyr::pull(stat, name=Gene) 
+
+# immunologic_signatures <- gmtPathways("NicheNet_Omnipath/c7.all.v7.1.symbols.gmt")
+hallmarlk_signatures <- gmtPathways("h.all.v7.1.symbols.gmt")
+# go_signatures <- gmtPathways("NicheNet_Omnipath/c5.bp.v7.1.symbols.gmt")
+
+fgseaRes <- fgsea(hallmarlk_signatures, ranks,  nperm=1000)
+# Testing only one pathway is implemented in a more efficient manner
+
+SignificantResults <- fgseaRes %>% 
+    dplyr::filter(padj < 0.01) %>% 
+    dplyr::arrange(desc(NES)) %>% 
+    dplyr::top_n(12, abs(NES))
+SignificantResults    
+```
+
+I select inflammation related genes. 
+
+```{r}
+## I am going to check with inflammation genes
+inflammationGenes <- SignificantResults %>% 
+    dplyr::filter(pathway == "HALLMARK_INFLAMMATORY_RESPONSE") %>% 
+    dplyr::pull(leadingEdge) %>% unlist()
+
+## We chech that there are no upregulated ligands here. 
+intersect(DDS_CALU3_ligands,inflammationGenes )
+
+geneset_oi <- inflammationGenes[inflammationGenes %in% rownames(ligand_target_matrix)]
+
+head(geneset_oi)
+background_expressed_genes <- expressed_genes_receiver %>%
+    .[. %in% rownames(ligand_target_matrix)]
+head(background_expressed_genes)
+```
+
+### Perform NicheNet's ligand activity analysis on the gene set of interest
+
+As potentially active ligands, we will use ligands that are 1) Over-expressed in
+CALU3 after SARS-CoV-2 infection and 2) can bind a (putative) receptor expressed 
+by malignant cells. Putative ligand-receptor links were gathered from Omnipath 
+ligand-receptor data sources.
+
+```{r}
+expressed_ligands <- intersect(ligands,DDS_CALU3_ligands)
+
+receptors <- unique(lr_network$to)
+expressed_receptors <- intersect(receptors,expressed_genes_receiver)
+
+potential_ligands <- lr_network %>% 
+    filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% 
+    pull(from) %>% 
+    unique()
+head(potential_ligands)
+```
+
+we now calculate the ligand activity of each ligand, or in other 
+words, we will assess how well each over-expressed ligand after viral infection
+can predict the inflammation gene set compared to the background of expressed genes 
+(predict whether a gene belongs to the inflammation program or not).
+
+```{r}
+ligand_activities <- predict_ligand_activities(
+    geneset = geneset_oi, 
+    background_expressed_genes = background_expressed_genes, 
+    ligand_target_matrix = ligand_target_matrix, 
+    potential_ligands = potential_ligands)
+```
+
+Now, we want to rank the ligands based on their ligand activity. In our 
+validation study, we showed that the pearson correlation between a ligand's 
+target predictions and the observed transcriptional response was the most 
+informative measure to define ligand activity. Therefore, we will rank the 
+ligands based on their pearson correlation coefficient.
+
+```{r}
+ligand_activities %>% 
+    arrange(-pearson)
+best_upstream_ligands <- ligand_activities %>% 
+    top_n(12, pearson) %>% 
+    arrange(-pearson) %>% 
+    pull(test_ligand)
+head(best_upstream_ligands)
+```
+
+For the top 12 ligands, we will now build a multi-ligand model that uses all 
+top-ranked ligands to predict whether a gene belongs to the inflammatory response 
+program of not. This classification model will be trained via cross-validation 
+and returns a probability for every gene. 
+
+```{r}
+## To increase these numbers.
+k = 3 # 3-fold
+n = 10 # 10 rounds
+inflammation_gene_predictions_top12_list <- seq(n) %>% 
+    lapply(assess_rf_class_probabilities, 
+           folds = k, 
+           geneset = geneset_oi, 
+           background_expressed_genes = background_expressed_genes, 
+           ligands_oi = best_upstream_ligands, 
+           ligand_target_matrix = ligand_target_matrix)
+```
+
+Evaluate now how well the target gene probabilies agree with the gene set 
+assignments
+
+```{r}
+# get performance: auroc-aupr-pearson
+target_prediction_performances_cv <- 
+    inflammation_gene_predictions_top12_list %>% 
+    lapply(classification_evaluation_continuous_pred_wrapper) %>% 
+    bind_rows() %>% 
+    mutate(round=seq(1:nrow(.)))
+```
+
+We display here the AUROC, AUPR and PCC of this model (averaged over 
+cross-validation rounds)
+
+```{r}
+target_prediction_performances_cv$auroc %>% mean()
+target_prediction_performances_cv$aupr %>% mean()
+target_prediction_performances_cv$pearson %>% mean()
+```
+
+Evaluate now whether genes belonging to the gene set are more likely to be 
+top-predicted. We look at the top 5% of predicted targets here.
+
+```{r}
+## get performance: how many inflammatory genes and inflammatory genes among 
+## top 5% predicted targets
+target_prediction_performances_discrete_cv <- 
+    inflammation_gene_predictions_top12_list %>% 
+    lapply(calculate_fraction_top_predicted, quantile_cutoff = 0.95) %>% 
+    bind_rows() %>% 
+    ungroup() %>% 
+    mutate(round=rep(1:length(inflammation_gene_predictions_top12_list), each = 2))
+```
+
+What is the fraction of inflammation related genes that belongs to the top 5% 
+predicted targets?
+
+```{r}
+target_prediction_performances_discrete_cv %>% 
+    filter(true_target) %>% 
+    .$fraction_positive_predicted %>% 
+    mean()
+```
+
+What is the fraction of non-inflammation related genes that belongs to the top 5% 
+predicted targets?
+
+```{r}
+target_prediction_performances_discrete_cv %>% 
+    filter(!true_target) %>% 
+    .$fraction_positive_predicted %>% 
+    mean()
+```
+
+We see that the inflammation genes are enriched in the top-predicted target 
+genes. To test this, we will now apply a Fisher's exact test for every 
+cross-validation round and report the average p-value.
+
+```{r}
+target_prediction_performances_discrete_fisher <- 
+    inflammation_gene_predictions_top12_list %>% 
+    lapply(calculate_fraction_top_predicted_fisher, quantile_cutoff = 0.95) 
+
+target_prediction_performances_discrete_fisher %>% unlist() %>% mean()
+```
+
+Finally, we will look at which genes are well-predicted in every 
+cross-validation round.
+
+```{r}
+# get top predicted genes
+top_predicted_genes <- seq(length(inflammation_gene_predictions_top12_list)) %>%                 
+    lapply(get_top_predicted_genes,inflammation_gene_predictions_top12_list) %>% 
+    purrr::reduce(full_join, by = c("gene","true_target"))
+top_predicted_genes %>% filter(true_target)
+```
+
+
+## References
+
+Browaeys, R., Saelens, W. & Saeys, Y. NicheNet: modeling intercellular communication by linking ligands to target genes. Nat Methods (2019) doi:10.1038/s41592-019-0667-5
+
+Puram, Sidharth V., Itay Tirosh, Anuraag S. Parikh, Anoop P. Patel, Keren Yizhak, Shawn Gillespie, Christopher Rodman, et al. 2017. “Single-Cell Transcriptomic Analysis of Primary and Metastatic Tumor Ecosystems in Head and Neck Cancer.” Cell 171 (7): 1611–1624.e24. https://doi.org/10.1016/j.cell.2017.10.044.
