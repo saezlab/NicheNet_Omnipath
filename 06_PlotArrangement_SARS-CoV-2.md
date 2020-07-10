@@ -288,4 +288,7 @@ ggsave(filename = "Results/MegeHeatmaps.eps", plot=figures_with_legend,
 ggsave(filename = "Results/MegeHeatmaps.png", plot=figures_with_legend,
        device = "png",  dpi = 600, limitsize = FALSE, width=6, height=8, 
        units = c("in"))
+ggsave(filename = "Results/MegaHeatmaps.svg", plot=figures_with_legend,
+       device = "svg",  dpi = 600, limitsize = FALSE, width=6, height=8, 
+       units = c("in"))
 ```
